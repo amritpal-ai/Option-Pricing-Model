@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import norm
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from payoff_simulator import plot_payoff
 
 # ---------- Functions ----------
 def black_scholes_price(S, K, T, r, sigma, option_type='call'):
@@ -87,15 +88,22 @@ if T <= 0:
 r = 0.06
 
 # ---------- Model Selection ----------
-if vol_annual > 0.5:
-    model_used = "Monte Carlo"
-    price, delta, gamma, vega, theta, rho = monte_carlo_price(spot_price, K, T, r, vol_annual, option_type)
-elif T >= 1:
-    model_used = "Binomial"
-    price, delta, gamma, vega, theta, rho = binomial_price(spot_price, K, T, r, vol_annual, option_type)
-else:
-    model_used = "Black-Scholes"
-    price, delta, gamma, vega, theta, rho = black_scholes_price(spot_price, K, T, r, vol_annual, option_type)
+#if vol_annual > 0.5:
+#   model_used = "Monte Carlo"
+ #   price, delta, gamma, vega, theta, rho = monte_carlo_price(spot_price, K, T, r, vol_annual, option_type)
+#elif T >= 1:
+ #   model_used = "Binomial"
+  #  price, delta, gamma, vega, theta, rho = binomial_price(spot_price, K, T, r, vol_annual, option_type)
+#else:
+ #   model_used = "Black-Scholes"
+  #  price, delta, gamma, vega, theta, rho = black_scholes_price(spot_price, K, T, r, vol_annual, option_type)
+  
+# ---------- Model Selection (Forced Black-Scholes for demo) ----------
+model_used = "Black-Scholes"
+price, delta, gamma, vega, theta, rho = black_scholes_price(
+    spot_price, K, T, r, vol_annual, option_type
+)
+
 
 # ---------- Output ----------
 print("\n--- Option Pricing Result ---")
@@ -116,14 +124,17 @@ print(f"Rho: {rho if rho is not None else 'N/A'}")
 # ---------- Plot Greeks (Separate Subplots) ----------
 if delta is not None and gamma is not None and vega is not None:
     K_range = np.linspace(K*0.8, K*1.2, 50)
-    deltas, gammas, vegas = [], [], []
+    deltas, gammas, vegas, thetas, rhos = [], [], [], [], []
     for k in K_range:
         p, d, g, v, t, r_ = black_scholes_price(spot_price, k, T, r, vol_annual, option_type)
         deltas.append(d)
         gammas.append(g)
         vegas.append(v)
+        thetas.append(t)
+        rhos.append(r_)
 
-    fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+
+    fig,axs = plt.subplots(5, 1, figsize=(10, 18), sharex=True)
     axs[0].plot(K_range, deltas, color='blue')
     axs[0].set_ylabel('Delta')
     axs[0].set_title(f'Option Greeks vs Strike Price for {stock_symbol}')
@@ -137,8 +148,26 @@ if delta is not None and gamma is not None and vega is not None:
     axs[2].set_ylabel('Vega')
     axs[2].set_xlabel('Strike Price')
     axs[2].grid(True)
+     
+    axs[3].plot(K_range, thetas, color='purple')
+    axs[3].set_ylabel('Theta')
+    axs[3].grid(True)
+
+    axs[4].plot(K_range, rhos, color='orange')
+    axs[4].set_ylabel('Rho')
+    axs[4].set_xlabel('Strike Price')
+    axs[4].grid(True)
 
     plt.tight_layout()
     plt.show()
 else:
     print("\nGreeks plotting not available for Binomial or Monte Carlo models.")
+
+
+# ---------- Payoff Simulation ----------
+see_payoff = input("\nDo you want to see the payoff diagram? (y/n): ").lower()
+if see_payoff == "y":
+    premium = price   # use the option price from the selected model
+    print(f"\nUsing model price ({premium:.2f}) as premium for payoff diagram...")
+    plot_payoff(K, premium, option_type=option_type)
+
