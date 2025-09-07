@@ -5,6 +5,9 @@ from scipy.stats import norm
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from payoff_simulator import plot_payoff
+import pandas as pd
+from predictor import train_and_predict, plot_predictions
+
 
 # ---------- Functions ----------
 def black_scholes_price(S, K, T, r, sigma, option_type='call'):
@@ -170,4 +173,45 @@ if see_payoff == "y":
     premium = price   # use the option price from the selected model
     print(f"\nUsing model price ({premium:.2f}) as premium for payoff diagram...")
     plot_payoff(K, premium, option_type=option_type)
+    
+# ---------- ML Prediction Extension ----------
+from predictor import train_and_predict
 
+# Use last 90 days of closing prices for ML
+recent_prices = close_prices[-90:].values
+lr_pred, rf_pred = train_and_predict(recent_prices, n_lags=5)
+
+print("\n--- ML Predicted Next Day ---")
+print(f"Linear Regression Predicted Spot: {lr_pred:.2f}")
+print(f"Random Forest Predicted Spot:    {rf_pred:.2f}")
+
+# Feed into Black–Scholes to get option price predictions
+bs_price_lr, *_ = black_scholes_price(lr_pred, K, T, r, vol_annual, option_type)
+bs_price_rf, *_ = black_scholes_price(rf_pred, K, T, r, vol_annual, option_type)
+print("\n--- Predicted Option Prices ---")
+print(f"Using Linear Regression Spot: {bs_price_lr:.2f}")
+print(f"Using Random Forest Spot:    {bs_price_rf:.2f}")
+
+# ---------- Comparison Table ----------
+results = {
+    "Model": ["Black-Scholes (today)", "Linear Regression (pred)", "Random Forest (pred)"],
+    "Spot": [spot_price, lr_pred, rf_pred],
+    "Option Price": [price, bs_price_lr, bs_price_rf]
+}
+df_results = pd.DataFrame(results)
+print("\n--- Comparison Table ---")
+print(df_results.to_string(index=False))
+
+
+# ---------- Plot ML predictions ----------
+plot_predictions(recent_prices, lr_pred, rf_pred)
+
+
+# ---------- Backtest Evaluation ----------
+#try:
+    #eval_stats = rolling_forecast_eval(close_prices.values[-180:], n_lags=5)
+   # print("\n--- ML Backtest (last 180 days) ---")
+  #  print(f"Linear Regression -> MAE: {eval_stats['lr']['mae']:.2f}, MAPE: {eval_stats['lr']['mape']:.2%}")
+ #   print(f"Random Forest     -> MAE: {eval_stats['rf']['mae']:.2f}, MAPE: {eval_stats['rf']['mape']:.2%}")
+#except Exception as e:
+#    print("Backtest skipped:", e)
