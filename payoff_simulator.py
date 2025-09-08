@@ -24,8 +24,10 @@ def option_payoff(spot_prices, K, premium, option_type="call", position="long"):
     
     return profit
 
+import io
+import base64
 
-def plot_payoff(K, premium, option_type="call"):
+def plot_payoff_base64(K, premium, option_type="call"):
     # Generate a range of possible spot prices
     spot_prices = np.linspace(K*0.7, K*1.3, 100)
     
@@ -53,11 +55,22 @@ def plot_payoff(K, premium, option_type="call"):
     plt.ylabel("Profit / Loss")
     plt.legend()
     plt.grid(True)
-    plt.show()
+
+    # 🔑 Save to Base64
+    img = io.BytesIO()
+    plt.savefig(img, format="png")
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode("utf-8")
+    plt.close()
+
+    return plot_url
+
+    
+
 
 
 # Example demo
-if __name__ == "__main__":
-    K = 20200
-    premium = 100
-    plot_payoff(K, premium, option_type="call")
+# if __name__ == "__main__":
+ #   K = 20200
+  #  premium = 100
+   # plot_payoff(K, premium, option_type="call") 

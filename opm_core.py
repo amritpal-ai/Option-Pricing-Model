@@ -4,7 +4,7 @@ import numpy as np
 from scipy.stats import norm
 from datetime import datetime, timedelta
 import pandas as pd
-from payoff_simulator import plot_payoff
+from payoff_simulator import plot_payoff_base64
 from predictor import train_and_predict, plot_predictions
 
 
@@ -79,28 +79,31 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     })
 
     return {
-        "stock": stock_symbol,
-        "spot": spot_price,
-        "vol": vol_annual,
-        "T": T,
-        "r": r,
-        "strike": strike,
-        "option_type": option_type,
-        "price": price,
-        "delta": delta,
-        "gamma": gamma,
-        "vega": vega,
-        "theta": theta,
-        "rho": rho,
-        "model": "Black-Scholes",
-        "ml_preds": {
-            "lr_pred": lr_pred,
-            "rf_pred": rf_pred,
-            "bs_price_lr": bs_price_lr,
-            "bs_price_rf": bs_price_rf,
-        },
-        "comparison_table": df_results.to_html(classes="table table-striped", index=False)
-    }
+    "stock": stock_symbol,
+    "spot": spot_price,
+    "vol": vol_annual,
+    "T": T,
+    "r": r,
+    "strike": strike,
+    "option_type": option_type,
+    "price": price,
+    "delta": delta,
+    "gamma": gamma,
+    "vega": vega,
+    "theta": theta,
+    "rho": rho,
+    "model": "Black-Scholes",
+    "ml_preds": {
+        "lr_pred": lr_pred,
+        "rf_pred": rf_pred,
+        "bs_price_lr": bs_price_lr,
+        "bs_price_rf": bs_price_rf,
+    },
+    "comparison_table": df_results.to_html(classes="table table-striped", index=False),
+    "close_prices": close_prices   # ✅ add this
+}
+
+
 
 
 # ---------- Greeks (for plotting) ----------
@@ -131,3 +134,80 @@ def get_greeks(result_dict):
         "theta": thetas,
         "rho": rhos
     }
+import io
+import base64
+import matplotlib.pyplot as plt
+
+def plot_greeks(greeks, stock_symbol):
+    """Return a Base64-encoded image of Greeks plots."""
+    K_range = greeks["K_range"]
+
+    fig, axs = plt.subplots(5, 1, figsize=(8, 18), sharex=True)
+
+    axs[0].plot(K_range, greeks["delta"], color='blue')
+    axs[0].set_ylabel('Delta')
+    axs[0].set_title(f'Greeks vs Strike Price for {stock_symbol}')
+
+    axs[1].plot(K_range, greeks["gamma"], color='green')
+    axs[1].set_ylabel('Gamma')
+
+    axs[2].plot(K_range, greeks["vega"], color='red')
+    axs[2].set_ylabel('Vega')
+
+    axs[3].plot(K_range, greeks["theta"], color='purple')
+    axs[3].set_ylabel('Theta')
+
+    axs[4].plot(K_range, greeks["rho"], color='orange')
+    axs[4].set_ylabel('Rho')
+    axs[4].set_xlabel('Strike Price')
+
+    plt.tight_layout()
+
+    # Save plot to memory → Base64 string
+    img = io.BytesIO()
+    plt.savefig(img, format="png")
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode("utf-8")
+    plt.close(fig)
+
+    return plot_url
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None):
+    """
+    Plot stock price history with moving averages and optional ML predictions.
+    """
+    plt.figure(figsize=(10, 5))
+    
+    # Plot actual prices
+    plt.plot(close_prices.index, close_prices.values, label="Closing Price", color="blue")
+
+    # Moving averages
+    close_prices.rolling(20).mean().plot(label="20-day MA", color="orange")
+    close_prices.rolling(50).mean().plot(label="50-day MA", color="green")
+
+    # Add ML predictions (optional)
+    if lr_pred is not None:
+        plt.scatter(close_prices.index[-1] + pd.Timedelta(days=1), lr_pred,
+                    color="purple", marker="o", label="LR Predicted Next Day")
+    if rf_pred is not None:
+        plt.scatter(close_prices.index[-1] + pd.Timedelta(days=1), rf_pred,
+                    color="red", marker="x", label="RF Predicted Next Day")
+
+    plt.title(f"{stock_symbol} - Last 6 Months Price History + Predictions")
+    plt.xlabel("Date")
+    plt.ylabel("Price (INR)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    # Save figure for Flask
+    filename = f"static/{stock_symbol}_history.png"
+    plt.savefig(filename)
+    plt.close()
+
+    return filename
+
+

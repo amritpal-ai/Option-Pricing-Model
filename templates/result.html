@@ -1,0 +1,108 @@
+<!-- templates/result.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Option Pricing Results</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body class="bg-light">
+
+    <div class="container mt-5">
+        <!-- Heading -->
+        <div class="text-center mb-4">
+            <h2>📊 Option Pricing Results</h2>
+            <p class="text-muted">Stock: <strong>{{ results.stock }}</strong> | Model: {{ results.model }}</p>
+        </div>
+
+
+        <h3>Stock History</h3>
+<img src="data:image/png;base64,{{ history_plot }}" class="img-fluid">
+
+
+        <!-- Main Card -->
+        <div class="card shadow-lg p-4 mb-4">
+            <h4>Option Details</h4>
+            <ul>
+                <li><strong>Spot Price:</strong> {{ results.spot }}</li>
+                <li><strong>Strike Price:</strong> {{ results.strike }}</li>
+                <li><strong>Option Type:</strong> {{ results.option_type.capitalize() }}</li>
+                <li><strong>Option Price:</strong> {{ results.price }}</li>
+                <li><strong>Annualized Volatility:</strong> {{ results.vol }}</li>
+                <li><strong>Time to Expiry (years):</strong> {{ results.T }}</li>
+            </ul>
+        </div>
+
+        <!-- Greeks -->
+        <div class="card shadow-lg p-4 mb-4">
+            <h4>Greeks</h4>
+            <ul>
+                <li>Delta: {{ results.delta }}</li>
+                <li>Gamma: {{ results.gamma }}</li>
+                <li>Vega: {{ results.vega }}</li>
+                <li>Theta: {{ results.theta }}</li>
+                <li>Rho: {{ results.rho }}</li>
+            </ul>
+        </div>
+
+        <!-- ML Predictions -->
+        <div class="card shadow-lg p-4 mb-4">
+            <h4>ML Predictions (Next Day)</h4>
+            <ul>
+                <li>Linear Regression Predicted Spot: {{ ml_preds.lr_pred }}</li>
+                <li>Random Forest Predicted Spot: {{ ml_preds.rf_pred }}</li>
+                <li>Option Price (LR Spot): {{ ml_preds.bs_price_lr }}</li>
+                <li>Option Price (RF Spot): {{ ml_preds.bs_price_rf }}</li>
+            </ul>
+        </div>
+
+        <!-- Comparison Table -->
+        <div class="card shadow-lg p-4 mb-4">
+            <h4>Comparison Table</h4>
+            {{ results.comparison_table | safe }}
+        </div>
+
+       
+
+    <!-- Greeks Graph -->
+<div class="card shadow-lg p-4 mb-4 text-center">
+    <h4>Greeks Plot</h4>
+    <img src="data:image/png;base64,{{ greek_plot }}" class="img-fluid" alt="Greeks Plot">
+</div>
+
+<!-- Payoff Diagram -->
+<div class="card shadow-lg p-4 mb-4 text-center">
+    <h4>Payoff Diagram</h4>
+    <img src="data:image/png;base64,{{ payoff_plot }}" class="img-fluid" alt="Payoff Diagram">
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ <!-- Back Button -->
+        <div class="text-center">
+            <a href="/" class="btn btn-secondary">⬅ Back</a>
+        </div>
+    </div>
+
+</body>
+</html>
