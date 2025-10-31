@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request
 from opm_core import run_option_model, get_greeks, plot_greeks
+import pandas as pd
 
 app = Flask(__name__)
 
@@ -48,20 +49,14 @@ def calculate():
 
 import matplotlib.pyplot as plt
 import io, base64
-def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None):
-    """
-    Plot stock price history with moving averages and optional ML predictions.
-    """
-    plt.figure(figsize=(10, 5))
-    
-    # Plot actual prices
-    plt.plot(close_prices.index, close_prices.values, label="Closing Price", color="blue")
 
-    # Moving averages
+def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None):
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(close_prices.index, close_prices.values, label="Closing Price", color="blue")
     close_prices.rolling(20).mean().plot(label="20-day MA", color="orange")
     close_prices.rolling(50).mean().plot(label="50-day MA", color="green")
 
-    # Add ML predictions (optional)
     if lr_pred is not None:
         plt.scatter(close_prices.index[-1] + pd.Timedelta(days=1), lr_pred,
                     color="purple", marker="o", label="LR Predicted Next Day")
@@ -76,12 +71,15 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None):
     plt.grid(True)
     plt.tight_layout()
 
-    # Save figure for Flask
-    filename = f"static/{stock_symbol}_history.png"
-    plt.savefig(filename)
+    # Convert to Base64
+    img_bytes = io.BytesIO()
+    plt.savefig(img_bytes, format="png")
+    img_bytes.seek(0)
+    encoded = base64.b64encode(img_bytes.read()).decode("utf-8")
     plt.close()
 
-    return filename
+    return encoded
+
 
 
 
