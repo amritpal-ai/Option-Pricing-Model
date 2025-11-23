@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from payoff_simulator import plot_payoff_base64
 from predictor import train_and_predict
 from sentiment_analyzer import get_average_sentiment, get_stock_news
+from predictor import train_and_predict, rolling_forecast_eval
 
 
 
@@ -35,22 +36,13 @@ def black_scholes_price(S, K, T, r, sigma, option_type='call'):
     return price, delta, gamma, vega, theta, rho
 
 
-from predictor import train_and_predict, rolling_forecast_eval
-import numpy as np
-import pandas as pd
-import yfinance as yf
-from datetime import datetime, timedelta
 
-
-from datetime import datetime, timedelta
-import numpy as np
-import pandas as pd
-import yfinance as yf
-from predictor import train_and_predict, rolling_forecast_eval
-from sentiment_analyzer import get_stock_news, get_average_sentiment
-
-
+# ---------- Main Option Model ----------
 def run_option_model(stock_symbol, strike, expiry_date, option_type):
+
+    # 🔥 Detect Render environment
+    IS_RENDER = os.environ.get("RENDER") == "true"
+
     # Ensure correct NSE format
     if not stock_symbol.endswith(".NS"):
         stock_symbol += ".NS"
@@ -99,29 +91,31 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     })
 
     # --- 🔍 Rolling Forecast Backtest ---
-    try:
-        backtest_stats = rolling_forecast_eval(close_prices.values, n_lags=5, test_days=60)
-        print("\n--- ML Backtest ---")
-        print(f"Linear Regression → MAE: {backtest_stats['lr']['mae']:.2f}, MAPE: {backtest_stats['lr']['mape']*100:.2f}%")
-        print(f"Random Forest → MAE: {backtest_stats['rf']['mae']:.2f}, MAPE: {backtest_stats['rf']['mape']*100:.2f}%")
-    except Exception as e:
-        print("Backtest skipped:", e)
+    if not IS_RENDER:
+        try:
+            backtest_stats = rolling_forecast_eval(close_prices.values, n_lags=5, test_days=60)
+            print("\n--- ML Backtest ---")
+            print(f"LR → MAE: {backtest_stats['lr']['mae']:.2f}, MAPE: {backtest_stats['lr']['mape']*100:.2f}%")
+            print(f"RF → MAE: {backtest_stats['rf']['mae']:.2f}, MAPE: {backtest_stats['rf']['mape']*100:.2f}%")
+        except Exception as e:
+            print("Backtest skipped:", e)
+            backtest_stats = None
+    else:
+        print("Backtest disabled on Render to prevent memory crash.")
         backtest_stats = None
 
-    # --- 📰 Sentiment Analysis Integration ---
+    # --- 📰 Sentiment Analysis ---
     headlines = get_stock_news(stock_symbol)
     avg_sentiment = get_average_sentiment(headlines)
 
-    # --- 🧮 Sentiment Adjustment (optional, slight boost/reduction) ---
-    sentiment_factor = 1 + (avg_sentiment * 0.05)  # 5% impact scaling
+    # --- 🧮 Sentiment Adjustment ---
+    sentiment_factor = 1 + (avg_sentiment * 0.05)
     lr_pred_adj = lr_pred * sentiment_factor
     rf_pred_adj = rf_pred * sentiment_factor
 
-    # Adjusted prices
     bs_price_lr_adj, *_ = black_scholes_price(lr_pred_adj, strike, T, r, vol_annual, option_type)
     bs_price_rf_adj, *_ = black_scholes_price(rf_pred_adj, strike, T, r, vol_annual, option_type)
 
-    # --- Return Everything to UI ---
     return {
         "stock": stock_symbol,
         "spot": spot_price,
@@ -146,10 +140,9 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
         "backtest_stats": backtest_stats,
         "comparison_table": df_results.to_html(classes="table table-striped", index=False),
         "close_prices": close_prices,
-        "sentiment": avg_sentiment,   # ✅ UI will now display sentiment bar
-        "headlines": headlines        # ✅ UI will show top headlines
+        "sentiment": avg_sentiment,
+        "headlines": headlines
     }
-
 
 
 
@@ -181,6 +174,7 @@ def get_greeks(result_dict):
         "theta": thetas,
         "rho": rhos
     }
+
 
 
 # ---------- Plot Greeks (Base64) ----------
@@ -216,6 +210,7 @@ def plot_greeks(greeks, stock_symbol):
     return plot_url
 
 
+
 def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
                        bs_price_lr=None, bs_price_rf=None):
     import matplotlib.dates as mdates
@@ -223,28 +218,25 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     plt.figure(figsize=(10, 5))
     ax = plt.gca()
 
-    # plot prices and moving averages
     ax.plot(close_prices.index, close_prices.values, label=stock_symbol, color="green")
     close_prices.rolling(20).mean().plot(ax=ax, label="20-day MA", color="orange")
     close_prices.rolling(50).mean().plot(ax=ax, label="50-day MA", color="green")
 
-    # predicted next-day x coordinate (one day after last date)
     last_date = close_prices.index[-1]
     next_date = last_date + pd.Timedelta(days=1)
 
     if lr_pred is not None:
-        ax.scatter(next_date, lr_pred, color="purple", marker="o", s=60, label="LR Predicted Next Day")
+        ax.scatter(next_date, lr_pred, color="purple", marker="o", s=60, label="LR Predicted")
         if bs_price_lr is not None:
             ax.annotate(f"LR opt: {bs_price_lr:.2f}", xy=(next_date, lr_pred),
-                        xytext=(8, 8), textcoords="offset points", color="purple", fontsize=9)
+                        xytext=(8, 8), textcoords="offset points", color="purple")
 
     if rf_pred is not None:
-        ax.scatter(next_date, rf_pred, color="red", marker="x", s=70, label="RF Predicted Next Day")
+        ax.scatter(next_date, rf_pred, color="red", marker="x", s=70, label="RF Predicted")
         if bs_price_rf is not None:
             ax.annotate(f"RF opt: {bs_price_rf:.2f}", xy=(next_date, rf_pred),
-                        xytext=(8, -14), textcoords="offset points", color="red", fontsize=9)
+                        xytext=(8, -14), textcoords="offset points", color="red")
 
-    # axis formatting
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     plt.xticks(rotation=35)
@@ -255,13 +247,9 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     plt.grid(True)
     plt.tight_layout()
 
-    # return base64 string for embedding in Flask (preferred)
-    import io, base64
     img = io.BytesIO()
     plt.savefig(img, format="png")
     img.seek(0)
     b64 = base64.b64encode(img.getvalue()).decode("utf-8")
     plt.close()
     return b64
-
-
