@@ -2,17 +2,56 @@
 import os
 import io
 import base64
+import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 from datetime import datetime, timedelta
-from payoff_simulator import plot_payoff_base64
-from predictor import train_and_predict
-from sentiment_analyzer import get_average_sentiment, get_stock_news
-from predictor import train_and_predict, rolling_forecast_eval
 
+from payoff_simulator import plot_payoff_base64
+from predictor import train_and_predict, rolling_forecast_eval
+from sentiment_analyzer import get_average_sentiment, get_stock_news
+
+
+# ---------- AlphaVantage Fallback ----------
+ALPHA_API_KEY = "KASZF271MGMR246C"
+
+def fetch_alpha_vantage_history(symbol):
+    """
+    Fetch closing price history using AlphaVantage (fallback for Render).
+    """
+    url = (
+        f"https://www.alphavantage.co/query?"
+        f"function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}"
+        f"&outputsize=compact&apikey={ALPHA_API_KEY}"
+    )
+
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if "Time Series (Daily)" not in data:
+            print("AlphaVantage error:", data)
+            return None
+
+        ts = data["Time Series (Daily)"]
+        dates = []
+        closes = []
+
+        for date_str, row in ts.items():
+            dates.append(date_str)
+            closes.append(float(row["4. close"]))
+
+        df = pd.DataFrame({"Close": closes}, index=pd.to_datetime(dates))
+        df = df.sort_index()
+
+        return df["Close"]
+
+    except Exception as e:
+        print("AlphaVantage fetch failed:", e)
+        return None
 
 
 # ---------- Black-Scholes Formula ----------
@@ -29,41 +68,52 @@ def black_scholes_price(S, K, T, r, sigma, option_type='call'):
 
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     vega = S * norm.pdf(d1) * np.sqrt(T)
-    theta = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T)) -
-             r * K * np.exp(-r*T) * (norm.cdf(d2) if option_type.lower() == 'call' else norm.cdf(-d2)))
+    theta = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T))
+             - r * K * np.exp(-r*T) *
+             (norm.cdf(d2) if option_type.lower() == 'call' else norm.cdf(-d2)))
     rho = K * T * np.exp(-r*T) * (norm.cdf(d2) if option_type.lower() == 'call' else -norm.cdf(-d2))
 
     return price, delta, gamma, vega, theta, rho
 
 
-
 # ---------- Main Option Model ----------
 def run_option_model(stock_symbol, strike, expiry_date, option_type):
 
-    # 🔥 Detect Render environment
     IS_RENDER = os.environ.get("RENDER") == "true"
 
-    # Ensure correct NSE format
+    # Ensure NSE format
     if not stock_symbol.endswith(".NS"):
         stock_symbol += ".NS"
 
-    # Fetch last 6 months of data
+    # Fetch last 6 months data
     end_date = datetime.today()
     start_date = end_date - timedelta(days=180)
 
-    data = yf.download(stock_symbol, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"))
-    if data.empty:
-        raise ValueError(f"No data found for {stock_symbol}. Check symbol and retry.")
+    # 1️⃣ Try yfinance
+    data = yf.download(
+        stock_symbol,
+        start=start_date.strftime("%Y-%m-%d"),
+        end=end_date.strftime("%Y-%m-%d")
+    )
 
-    close_prices = data['Close']
+    # 2️⃣ If yfinance fails → fallback to AlphaVantage
+    if not data.empty:
+        close_prices = data["Close"]
+    else:
+        print("⚠️ yfinance failed. Switching to AlphaVantage...")
+        close_prices = fetch_alpha_vantage_history(stock_symbol)
+
+    # If both fail → error
+    if close_prices is None or len(close_prices) < 30:
+        raise ValueError(f"No reliable data found for {stock_symbol}.")
+
     spot_price = float(close_prices.iloc[-1])
 
-    # Volatility (annualized)
+    # Volatility
     log_returns = np.log(close_prices / close_prices.shift(1)).dropna()
-    vol_daily = log_returns.std()
-    vol_annual = float(vol_daily * np.sqrt(252))
+    vol_annual = float(log_returns.std() * np.sqrt(252))
 
-    # Time to expiry
+    # Expiry time
     expiry_datetime = datetime.strptime(expiry_date, "%Y-%m-%d")
     T = (expiry_datetime - datetime.today()).days / 365.0
     if T <= 0:
@@ -72,12 +122,12 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     # Risk-free rate
     r = 0.06
 
-    # --- Black-Scholes Base Model ---
+    # Base BS price
     price, delta, gamma, vega, theta, rho = black_scholes_price(
         spot_price, strike, T, r, vol_annual, option_type
     )
 
-    # --- Machine Learning Predictions ---
+    # ---------- ML Predictions ----------
     recent_prices = close_prices[-90:].values
     lr_pred, rf_pred = train_and_predict(recent_prices, n_lags=5)
 
@@ -90,26 +140,20 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
         "Option Price": [price, bs_price_lr, bs_price_rf]
     })
 
-    # --- 🔍 Rolling Forecast Backtest ---
+    # ---------- Disable Backtest on Render ----------
     if not IS_RENDER:
         try:
             backtest_stats = rolling_forecast_eval(close_prices.values, n_lags=5, test_days=60)
-            print("\n--- ML Backtest ---")
-            print(f"LR → MAE: {backtest_stats['lr']['mae']:.2f}, MAPE: {backtest_stats['lr']['mape']*100:.2f}%")
-            print(f"RF → MAE: {backtest_stats['rf']['mae']:.2f}, MAPE: {backtest_stats['rf']['mape']*100:.2f}%")
-        except Exception as e:
-            print("Backtest skipped:", e)
+        except:
             backtest_stats = None
     else:
-        print("Backtest disabled on Render to prevent memory crash.")
         backtest_stats = None
 
-    # --- 📰 Sentiment Analysis ---
+    # ---------- Sentiment Analysis ----------
     headlines = get_stock_news(stock_symbol)
     avg_sentiment = get_average_sentiment(headlines)
 
-    # --- 🧮 Sentiment Adjustment ---
-    sentiment_factor = 1 + (avg_sentiment * 0.05)
+    sentiment_factor = 1 + avg_sentiment * 0.05
     lr_pred_adj = lr_pred * sentiment_factor
     rf_pred_adj = rf_pred * sentiment_factor
 
@@ -145,7 +189,6 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     }
 
 
-
 # ---------- Greeks Generator ----------
 def get_greeks(result_dict):
     K = result_dict["strike"]
@@ -176,80 +219,59 @@ def get_greeks(result_dict):
     }
 
 
-
-# ---------- Plot Greeks (Base64) ----------
+# ---------- Plot Greeks ----------
 def plot_greeks(greeks, stock_symbol):
     K_range = greeks["K_range"]
 
     fig, axs = plt.subplots(5, 1, figsize=(8, 18), sharex=True)
 
-    axs[0].plot(K_range, greeks["delta"], color='blue')
-    axs[0].set_ylabel('Delta')
-    axs[0].set_title(f'Greeks vs Strike Price for {stock_symbol}')
+    labels = ["Delta", "Gamma", "Vega", "Theta", "Rho"]
+    colors = ["blue", "green", "red", "purple", "orange"]
 
-    axs[1].plot(K_range, greeks["gamma"], color='green')
-    axs[1].set_ylabel('Gamma')
-
-    axs[2].plot(K_range, greeks["vega"], color='red')
-    axs[2].set_ylabel('Vega')
-
-    axs[3].plot(K_range, greeks["theta"], color='purple')
-    axs[3].set_ylabel('Theta')
-
-    axs[4].plot(K_range, greeks["rho"], color='orange')
-    axs[4].set_ylabel('Rho')
-    axs[4].set_xlabel('Strike Price')
+    for i, key in enumerate(["delta", "gamma", "vega", "theta", "rho"]):
+        axs[i].plot(K_range, greeks[key], color=colors[i])
+        axs[i].set_ylabel(labels[i])
+    axs[-1].set_xlabel("Strike Price")
+    axs[0].set_title(f"Greeks vs Strike Price for {stock_symbol}")
 
     plt.tight_layout()
-
     img = io.BytesIO()
     plt.savefig(img, format="png")
     img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode("utf-8")
+    encoded = base64.b64encode(img.getvalue()).decode("utf-8")
     plt.close(fig)
-    return plot_url
+    return encoded
 
 
-
+# ---------- Stock History Plot ----------
 def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
                        bs_price_lr=None, bs_price_rf=None):
+
     import matplotlib.dates as mdates
 
     plt.figure(figsize=(10, 5))
     ax = plt.gca()
 
-    ax.plot(close_prices.index, close_prices.values, label=stock_symbol, color="green")
+    ax.plot(close_prices.index, close_prices.values, label="Close", color="blue")
     close_prices.rolling(20).mean().plot(ax=ax, label="20-day MA", color="orange")
     close_prices.rolling(50).mean().plot(ax=ax, label="50-day MA", color="green")
 
-    last_date = close_prices.index[-1]
-    next_date = last_date + pd.Timedelta(days=1)
+    last = close_prices.index[-1]
+    next_day = last + pd.Timedelta(days=1)
 
     if lr_pred is not None:
-        ax.scatter(next_date, lr_pred, color="purple", marker="o", s=60, label="LR Predicted")
-        if bs_price_lr is not None:
-            ax.annotate(f"LR opt: {bs_price_lr:.2f}", xy=(next_date, lr_pred),
-                        xytext=(8, 8), textcoords="offset points", color="purple")
-
+        ax.scatter(next_day, lr_pred, color="purple", s=60)
     if rf_pred is not None:
-        ax.scatter(next_date, rf_pred, color="red", marker="x", s=70, label="RF Predicted")
-        if bs_price_rf is not None:
-            ax.annotate(f"RF opt: {bs_price_rf:.2f}", xy=(next_date, rf_pred),
-                        xytext=(8, -14), textcoords="offset points", color="red")
+        ax.scatter(next_day, rf_pred, color="red", s=60)
 
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     plt.xticks(rotation=35)
-    plt.title(f"{stock_symbol} - Last 6 Months Price History + Predictions")
-    plt.xlabel("Date")
-    plt.ylabel("Price (INR)")
-    plt.legend()
+    plt.title(f"{stock_symbol} - Price History")
     plt.grid(True)
-    plt.tight_layout()
+    plt.legend()
 
     img = io.BytesIO()
     plt.savefig(img, format="png")
     img.seek(0)
-    b64 = base64.b64encode(img.getvalue()).decode("utf-8")
-    plt.close()
-    return b64
+    return base64.b64encode(img.read()).decode("utf-8")
