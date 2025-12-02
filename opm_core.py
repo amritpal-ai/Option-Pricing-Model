@@ -3,7 +3,6 @@ import os
 import io
 import base64
 import requests
-import yfinance as yf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,184 +14,142 @@ from predictor import train_and_predict, rolling_forecast_eval
 from sentiment_analyzer import get_average_sentiment, get_stock_news
 
 
-# ---------- AlphaVantage Fallback ----------
-ALPHA_API_KEY = "KASZF271MGMR246C"
 
-def fetch_alpha_vantage_history(symbol):
+# ---------- FMP Data Fetcher ----------
+def fetch_fmp_history(symbol):
     """
-    Fetch closing price history using AlphaVantage (fallback for Render).
+    Fetch up to 1 year historical price data using FMP API.
+    Works for US & NSE stocks.
     """
-    url = (
-        f"https://www.alphavantage.co/query?"
-        f"function=TIME_SERIES_DAILY_ADJUSTED&symbol={symbol}"
-        f"&outputsize=compact&apikey={ALPHA_API_KEY}"
-    )
+    api_key = os.environ.get("FMP_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("FMP_API_KEY missing. Add it to Render environment variables.")
+
+    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?timeseries=200&apikey={api_key}"
 
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        r = requests.get(url, timeout=12)
+        data = r.json()
 
-        if "Time Series (Daily)" not in data:
-            print("AlphaVantage error:", data)
+        if "historical" not in data:
+            print("FMP error:", data)
             return None
 
-        ts = data["Time Series (Daily)"]
-        dates, closes = [], []
+        df = pd.DataFrame(data["historical"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
 
-        for date_str, row in ts.items():
-            dates.append(date_str)
-            closes.append(float(row["4. close"]))
-
-        df = pd.DataFrame({"Close": closes}, index=pd.to_datetime(dates))
-        df = df.sort_index()
-
-        return df["Close"]
+        return df.set_index("date")["close"]
 
     except Exception as e:
-        print("AlphaVantage fetch failed:", e)
+        print("FMP fetch failed:", e)
         return None
 
 
-# ---------- Smart NSE Detection ----------
-INDIAN_LIST = {
-    "RELIANCE", "TCS", "INFY", "HDFCBANK", "HDFC",
-    "SBIN", "KOTAKBANK", "ICICIBANK", "ITC",
-    "AXISBANK", "LT", "MARUTI", "SUNPHARMA",
-    "BAJAJFINSERV", "ZOMATO", "TATAMOTORS",
-    "ADANIPORTS", "ADANIENT", "ULTRACEMCO",
-    "BHARTIARTL", "WIPRO", "HCLTECH", "POWERGRID",
-    "JSWSTEEL", "COALINDIA", "BAJAJ-AUTO"
-}
 
-def normalize_symbol(symbol):
+# ---------- Detect NSE Symbols ----------
+INDIAN_LIST = [
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "HDFC", "SBIN", "KOTAKBANK",
+    "ICICIBANK", "ITC", "AXISBANK", "LT", "MARUTI", "SUNPHARMA",
+    "BAJAJFINSERV", "BHARTIARTL", "TITAN", "ULTRACEMCO", "ASIANPAINT"
+]
+
+def normalize_symbol(stock):
     """
-    Auto-add .NS only for known Indian stocks.
-    Avoid modifying US/global symbols.
+    Add .NS ONLY for Indian stocks.
+    US tickers remain untouched.
     """
-    s = symbol.upper().strip()
-
-    # If already has a suffix (AAPL, TSLA, RELIANCE.NS) → don't modify
-    if "." in s:
-        return s
-
-    # If it matches our Indian stock list → add .NS
+    s = stock.upper().strip()
     if s in INDIAN_LIST:
         return s + ".NS"
-
-    # Otherwise leave unchanged (AAPL, TSLA, AMZN, BTC-USD)
     return s
 
 
-# ---------- Black-Scholes Formula ----------
+
+# ---------- Black-Scholes ----------
 def black_scholes_price(S, K, T, r, sigma, option_type='call'):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
     if option_type.lower() == 'call':
-        price = S * norm.cdf(d1) - K * np.exp(-r*T) * norm.cdf(d2)
+        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
         delta = norm.cdf(d1)
     else:
-        price = K * np.exp(-r*T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         delta = -norm.cdf(-d1)
 
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     vega = S * norm.pdf(d1) * np.sqrt(T)
     theta = (
         -S * norm.pdf(d1) * sigma / (2 * np.sqrt(T))
-        - r * K * np.exp(-r*T) *
-        (norm.cdf(d2) if option_type.lower() == 'call' else norm.cdf(-d2))
+        - r * K * np.exp(-r * T) *
+        (norm.cdf(d2) if option_type == 'call' else norm.cdf(-d2))
     )
-    rho = K * T * np.exp(-r*T) * (
-        norm.cdf(d2) if option_type.lower() == 'call' else -norm.cdf(-d2)
-    )
+    rho = K * T * np.exp(-r * T) * (norm.cdf(d2) if option_type == 'call' else -norm.cdf(-d2))
 
     return price, delta, gamma, vega, theta, rho
+
 
 
 # ---------- Main Option Model ----------
 def run_option_model(stock_symbol, strike, expiry_date, option_type):
 
-    IS_RENDER = os.environ.get("RENDER") == "true"
+    symbol = normalize_symbol(stock_symbol)
 
-    # Smart normalization
-    stock_symbol = normalize_symbol(stock_symbol)
+    # Fetch data using FMP
+    close_prices = fetch_fmp_history(symbol)
 
-    # Fetch 6 months of data
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=180)
+    if close_prices is None or len(close_prices) < 50:
+        raise ValueError(f"No reliable data found for {symbol}.")
 
-    # 1️⃣ Try yfinance first
-    data = yf.download(
-        stock_symbol,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d")
-    )
-
-    # 2️⃣ Fallback to AlphaVantage if empty
-    if not data.empty:
-        close_prices = data["Close"]
-    else:
-        print("⚠️ yfinance failed → switching to AlphaVantage...")
-        close_prices = fetch_alpha_vantage_history(stock_symbol)
-
-    if close_prices is None or len(close_prices) < 30:
-        raise ValueError(f"No reliable data found for {stock_symbol}.")
-
-    # Spot price
     spot_price = float(close_prices.iloc[-1])
 
     # Volatility
     log_returns = np.log(close_prices / close_prices.shift(1)).dropna()
     vol_annual = float(log_returns.std() * np.sqrt(252))
 
-    # Expiry
-    expiry_datetime = datetime.strptime(expiry_date, "%Y-%m-%d")
-    T = (expiry_datetime - datetime.today()).days / 365.0
+    # Expiry time
+    expiry = datetime.strptime(expiry_date, "%Y-%m-%d")
+    T = (expiry - datetime.today()).days / 365.0
     if T <= 0:
-        raise ValueError("Expiry must be a future date.")
+        raise ValueError("Expiry must be in the future.")
 
-    r = 0.06  # Risk-free rate
+    r = 0.06
 
-    # Base Black-Scholes
+    # BS price
     price, delta, gamma, vega, theta, rho = black_scholes_price(
         spot_price, strike, T, r, vol_annual, option_type
     )
 
-    # ---------- ML Predictions ----------
-    recent_prices = close_prices[-90:].values
-    lr_pred, rf_pred = train_and_predict(recent_prices, n_lags=5)
+    # ML predictions
+    recent = close_prices[-90:].values
+    lr_pred, rf_pred = train_and_predict(recent, n_lags=5)
 
-    bs_price_lr, *_ = black_scholes_price(lr_pred, strike, T, r, vol_annual, option_type)
-    bs_price_rf, *_ = black_scholes_price(rf_pred, strike, T, r, vol_annual, option_type)
+    bs_lr, *_ = black_scholes_price(lr_pred, strike, T, r, vol_annual, option_type)
+    bs_rf, *_ = black_scholes_price(rf_pred, strike, T, r, vol_annual, option_type)
 
     df_results = pd.DataFrame({
-        "Model": ["Black-Scholes (today)", "Linear Regression (pred)", "Random Forest (pred)"],
+        "Model": ["Black-Scholes", "Linear Regression", "Random Forest"],
         "Spot": [spot_price, lr_pred, rf_pred],
-        "Option Price": [price, bs_price_lr, bs_price_rf]
+        "Option Price": [price, bs_lr, bs_rf]
     })
 
     # Disable backtest on Render
-    if not IS_RENDER:
-        try:
-            backtest_stats = rolling_forecast_eval(close_prices.values, n_lags=5, test_days=60)
-        except:
-            backtest_stats = None
-    else:
-        backtest_stats = None
+    backtest_stats = None
 
-    # ---------- Sentiment Analysis ----------
-    headlines = get_stock_news(stock_symbol)
+    # Sentiment
+    headlines = get_stock_news(symbol)
     avg_sentiment = get_average_sentiment(headlines)
 
     sentiment_factor = 1 + avg_sentiment * 0.05
     lr_pred_adj = lr_pred * sentiment_factor
     rf_pred_adj = rf_pred * sentiment_factor
 
-    bs_price_lr_adj, *_ = black_scholes_price(lr_pred_adj, strike, T, r, vol_annual, option_type)
-    bs_price_rf_adj, *_ = black_scholes_price(rf_pred_adj, strike, T, r, vol_annual, option_type)
+    bs_lr_adj, *_ = black_scholes_price(lr_pred_adj, strike, T, r, vol_annual, option_type)
+    bs_rf_adj, *_ = black_scholes_price(rf_pred_adj, strike, T, r, vol_annual, option_type)
 
     return {
-        "stock": stock_symbol,
+        "stock": symbol,
         "spot": spot_price,
         "vol": vol_annual,
         "T": T,
@@ -205,77 +162,78 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
         "vega": vega,
         "theta": theta,
         "rho": rho,
-        "model": "Black-Scholes",
+        "comparison_table": df_results.to_html(classes="table table-striped", index=False),
         "ml_preds": {
             "lr_pred": lr_pred_adj,
             "rf_pred": rf_pred_adj,
-            "bs_price_lr": bs_price_lr_adj,
-            "bs_price_rf": bs_price_rf_adj,
+            "bs_price_lr": bs_lr_adj,
+            "bs_price_rf": bs_rf_adj,
         },
         "backtest_stats": backtest_stats,
-        "comparison_table": df_results.to_html(classes="table table-striped", index=False),
         "close_prices": close_prices,
+        "headlines": headlines,
         "sentiment": avg_sentiment,
-        "headlines": headlines
     }
 
 
-# ---------- Greeks Generator ----------
-def get_greeks(result_dict):
-    K = result_dict["strike"]
-    spot = result_dict["spot"]
-    T = result_dict["T"]
-    r = result_dict["r"]
-    sigma = result_dict["vol"]
-    option_type = result_dict["option_type"]
+
+# ---------- Greeks ----------
+def get_greeks(result):
+    K = result["strike"]
+    spot = result["spot"]
+    T = result["T"]
+    r = result["r"]
+    sigma = result["vol"]
+    opt_type = result["option_type"]
 
     K_range = np.linspace(K * 0.8, K * 1.2, 50)
-    deltas, gammas, vegas, thetas, rhos = [], [], [], [], []
+    delta, gamma, vega, theta, rho = [], [], [], [], []
 
     for k in K_range:
-        _, d, g, v, t, r_ = black_scholes_price(spot, k, T, r, sigma, option_type)
-        deltas.append(d)
-        gammas.append(g)
-        vegas.append(v)
-        thetas.append(t)
-        rhos.append(r_)
+        _, d, g, v, t, r_ = black_scholes_price(spot, k, T, r, sigma, opt_type)
+        delta.append(d)
+        gamma.append(g)
+        vega.append(v)
+        theta.append(t)
+        rho.append(r_)
 
     return {
         "K_range": K_range.tolist(),
-        "delta": deltas,
-        "gamma": gammas,
-        "vega": vegas,
-        "theta": thetas,
-        "rho": rhos
+        "delta": delta,
+        "gamma": gamma,
+        "vega": vega,
+        "theta": theta,
+        "rho": rho
     }
 
 
-# ---------- Greeks Plot ----------
-def plot_greeks(greeks, stock_symbol):
-    K_range = greeks["K_range"]
+
+# ---------- Plot Greeks ----------
+def plot_greeks(greeks, symbol):
+    K = greeks["K_range"]
 
     fig, axs = plt.subplots(5, 1, figsize=(8, 18), sharex=True)
-
-    labels = ["Delta", "Gamma", "Vega", "Theta", "Rho"]
+    keys = ["delta", "gamma", "vega", "theta", "rho"]
     colors = ["blue", "green", "red", "purple", "orange"]
 
-    for i, key in enumerate(["delta", "gamma", "vega", "theta", "rho"]):
-        axs[i].plot(K_range, greeks[key], color=colors[i])
-        axs[i].set_ylabel(labels[i])
+    for i, key in enumerate(keys):
+        axs[i].plot(K, greeks[key], color=colors[i])
+        axs[i].set_ylabel(key.capitalize())
+
     axs[-1].set_xlabel("Strike Price")
-    axs[0].set_title(f"Greeks vs Strike Price for {stock_symbol}")
+    axs[0].set_title(f"Greeks vs Strike Price — {symbol}")
 
-    plt.tight_layout()
     img = io.BytesIO()
+    plt.tight_layout()
     plt.savefig(img, format="png")
-    img.seek(0)
-    encoded = base64.b64encode(img.getvalue()).decode("utf-8")
-    plt.close(fig)
-    return encoded
+    plt.close()
+
+    return base64.b64encode(img.getvalue()).decode("utf-8")
 
 
-# ---------- Stock History Plot ----------
-def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
+
+# ---------- Price History Plot ----------
+def plot_stock_history(symbol, close_prices, lr_pred=None, rf_pred=None,
                        bs_price_lr=None, bs_price_rf=None):
 
     import matplotlib.dates as mdates
@@ -290,19 +248,20 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     last = close_prices.index[-1]
     next_day = last + pd.Timedelta(days=1)
 
-    if lr_pred is not None:
-        ax.scatter(next_day, lr_pred, color="purple", s=60)
-    if rf_pred is not None:
-        ax.scatter(next_day, rf_pred, color="red", s=60)
+    if lr_pred:
+        ax.scatter(next_day, lr_pred, s=60, color="purple")
 
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    if rf_pred:
+        ax.scatter(next_day, rf_pred, s=60, color="red")
+
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    plt.xticks(rotation=35)
-    plt.title(f"{stock_symbol} - Price History")
-    plt.grid(True)
+    plt.xticks(rotation=30)
     plt.legend()
+    plt.title(f"{symbol} — Price History")
+    plt.grid(True)
 
     img = io.BytesIO()
     plt.savefig(img, format="png")
-    img.seek(0)
+    plt.close()
+
     return base64.b64encode(img.read()).decode("utf-8")
