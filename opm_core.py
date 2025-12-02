@@ -37,8 +37,7 @@ def fetch_alpha_vantage_history(symbol):
             return None
 
         ts = data["Time Series (Daily)"]
-        dates = []
-        closes = []
+        dates, closes = [], []
 
         for date_str, row in ts.items():
             dates.append(date_str)
@@ -54,9 +53,39 @@ def fetch_alpha_vantage_history(symbol):
         return None
 
 
+# ---------- Smart NSE Detection ----------
+INDIAN_LIST = {
+    "RELIANCE", "TCS", "INFY", "HDFCBANK", "HDFC",
+    "SBIN", "KOTAKBANK", "ICICIBANK", "ITC",
+    "AXISBANK", "LT", "MARUTI", "SUNPHARMA",
+    "BAJAJFINSERV", "ZOMATO", "TATAMOTORS",
+    "ADANIPORTS", "ADANIENT", "ULTRACEMCO",
+    "BHARTIARTL", "WIPRO", "HCLTECH", "POWERGRID",
+    "JSWSTEEL", "COALINDIA", "BAJAJ-AUTO"
+}
+
+def normalize_symbol(symbol):
+    """
+    Auto-add .NS only for known Indian stocks.
+    Avoid modifying US/global symbols.
+    """
+    s = symbol.upper().strip()
+
+    # If already has a suffix (AAPL, TSLA, RELIANCE.NS) → don't modify
+    if "." in s:
+        return s
+
+    # If it matches our Indian stock list → add .NS
+    if s in INDIAN_LIST:
+        return s + ".NS"
+
+    # Otherwise leave unchanged (AAPL, TSLA, AMZN, BTC-USD)
+    return s
+
+
 # ---------- Black-Scholes Formula ----------
 def black_scholes_price(S, K, T, r, sigma, option_type='call'):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
     if option_type.lower() == 'call':
@@ -68,10 +97,14 @@ def black_scholes_price(S, K, T, r, sigma, option_type='call'):
 
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     vega = S * norm.pdf(d1) * np.sqrt(T)
-    theta = (-S * norm.pdf(d1) * sigma / (2 * np.sqrt(T))
-             - r * K * np.exp(-r*T) *
-             (norm.cdf(d2) if option_type.lower() == 'call' else norm.cdf(-d2)))
-    rho = K * T * np.exp(-r*T) * (norm.cdf(d2) if option_type.lower() == 'call' else -norm.cdf(-d2))
+    theta = (
+        -S * norm.pdf(d1) * sigma / (2 * np.sqrt(T))
+        - r * K * np.exp(-r*T) *
+        (norm.cdf(d2) if option_type.lower() == 'call' else norm.cdf(-d2))
+    )
+    rho = K * T * np.exp(-r*T) * (
+        norm.cdf(d2) if option_type.lower() == 'call' else -norm.cdf(-d2)
+    )
 
     return price, delta, gamma, vega, theta, rho
 
@@ -81,48 +114,46 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
 
     IS_RENDER = os.environ.get("RENDER") == "true"
 
-    # Ensure NSE format
-    if not stock_symbol.endswith(".NS"):
-        stock_symbol += ".NS"
+    # Smart normalization
+    stock_symbol = normalize_symbol(stock_symbol)
 
-    # Fetch last 6 months data
+    # Fetch 6 months of data
     end_date = datetime.today()
     start_date = end_date - timedelta(days=180)
 
-    # 1️⃣ Try yfinance
+    # 1️⃣ Try yfinance first
     data = yf.download(
         stock_symbol,
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d")
     )
 
-    # 2️⃣ If yfinance fails → fallback to AlphaVantage
+    # 2️⃣ Fallback to AlphaVantage if empty
     if not data.empty:
         close_prices = data["Close"]
     else:
-        print("⚠️ yfinance failed. Switching to AlphaVantage...")
+        print("⚠️ yfinance failed → switching to AlphaVantage...")
         close_prices = fetch_alpha_vantage_history(stock_symbol)
 
-    # If both fail → error
     if close_prices is None or len(close_prices) < 30:
         raise ValueError(f"No reliable data found for {stock_symbol}.")
 
+    # Spot price
     spot_price = float(close_prices.iloc[-1])
 
     # Volatility
     log_returns = np.log(close_prices / close_prices.shift(1)).dropna()
     vol_annual = float(log_returns.std() * np.sqrt(252))
 
-    # Expiry time
+    # Expiry
     expiry_datetime = datetime.strptime(expiry_date, "%Y-%m-%d")
     T = (expiry_datetime - datetime.today()).days / 365.0
     if T <= 0:
         raise ValueError("Expiry must be a future date.")
 
-    # Risk-free rate
-    r = 0.06
+    r = 0.06  # Risk-free rate
 
-    # Base BS price
+    # Base Black-Scholes
     price, delta, gamma, vega, theta, rho = black_scholes_price(
         spot_price, strike, T, r, vol_annual, option_type
     )
@@ -140,7 +171,7 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
         "Option Price": [price, bs_price_lr, bs_price_rf]
     })
 
-    # ---------- Disable Backtest on Render ----------
+    # Disable backtest on Render
     if not IS_RENDER:
         try:
             backtest_stats = rolling_forecast_eval(close_prices.values, n_lags=5, test_days=60)
@@ -219,7 +250,7 @@ def get_greeks(result_dict):
     }
 
 
-# ---------- Plot Greeks ----------
+# ---------- Greeks Plot ----------
 def plot_greeks(greeks, stock_symbol):
     K_range = greeks["K_range"]
 
