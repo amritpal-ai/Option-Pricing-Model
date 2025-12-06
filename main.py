@@ -11,7 +11,6 @@ app = Flask(__name__)
 def index():
     return render_template("index.html")
 
-
 @app.route("/calculate", methods=["POST"])
 def calculate():
     stock = request.form["stock"]
@@ -19,11 +18,9 @@ def calculate():
     expiry = request.form["expiry"]
     option_type = request.form["option_type"]
 
-    # Run main model
     results = run_option_model(stock, strike, expiry, option_type)
     greeks = get_greeks(results)
 
-    # 📈 Stock history chart with ML predictions and annotations
     history_plot = plot_stock_history(
         stock,
         results["close_prices"],
@@ -33,26 +30,19 @@ def calculate():
         bs_price_rf=results["ml_preds"]["bs_price_rf"]
     )
 
-    # Greeks & payoff diagrams
     greek_plot = plot_greeks(greeks, stock)
     payoff_plot = plot_payoff_base64(results["strike"], results["price"], option_type)
-
-    ml_preds = results["ml_preds"]
 
     return render_template(
         "result.html",
         results=results,
         greeks=greeks,
-        ml_preds=ml_preds,
+        ml_preds=results["ml_preds"],
         greek_plot=greek_plot,
         payoff_plot=payoff_plot,
         history_plot=history_plot
     )
 
-
-# ---------------------------------------
-# 📊 Plot Stock History with annotations
-# ---------------------------------------
 def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
                        bs_price_lr=None, bs_price_rf=None):
     import matplotlib.dates as mdates
@@ -60,7 +50,6 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     plt.figure(figsize=(10, 5))
     ax = plt.gca()
 
-    # Plot stock price and moving averages
     ax.plot(close_prices.index, close_prices.values, label=stock_symbol, color="green")
     close_prices.rolling(20).mean().plot(ax=ax, label="20-day MA", color="orange")
     close_prices.rolling(50).mean().plot(ax=ax, label="50-day MA", color="blue")
@@ -68,7 +57,6 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     last_date = close_prices.index[-1]
     next_date = last_date + pd.Timedelta(days=1)
 
-    # 🔮 ML Predictions + Annotations
     if lr_pred is not None:
         ax.scatter(next_date, lr_pred, color="purple", marker="o", s=60, label="LR Predicted Next Day")
         if bs_price_lr is not None:
@@ -83,7 +71,6 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
                         xytext=(8, -14), textcoords="offset points",
                         color="red", fontsize=9, weight='bold')
 
-    # Formatting
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     plt.xticks(rotation=35)
@@ -94,7 +81,6 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
     plt.grid(True)
     plt.tight_layout()
 
-    # Convert to Base64 for embedding in Flask
     img_bytes = io.BytesIO()
     plt.savefig(img_bytes, format="png")
     img_bytes.seek(0)
@@ -103,6 +89,7 @@ def plot_stock_history(stock_symbol, close_prices, lr_pred=None, rf_pred=None,
 
     return encoded
 
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
