@@ -1,49 +1,16 @@
 # ---------- Imports ----------
-import os
 import io
 import base64
-import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import yfinance as yf
 from scipy.stats import norm
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from payoff_simulator import plot_payoff_base64
-from predictor import train_and_predict, rolling_forecast_eval
+from predictor import train_and_predict
 from sentiment_analyzer import get_average_sentiment, get_stock_news
-
-
-
-# ---------- FMP Data Fetcher ----------
-def fetch_fmp_history(symbol):
-    """
-    Fetch up to 1 year historical price data using FMP API.
-    Works for US & NSE stocks.
-    """
-    api_key = os.environ.get("FMP_API_KEY", "").strip()
-    if not api_key:
-        raise ValueError("FMP_API_KEY missing. Add it to Render environment variables.")
-
-    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?timeseries=200&apikey={api_key}"
-
-    try:
-        r = requests.get(url, timeout=12)
-        data = r.json()
-
-        if "historical" not in data:
-            print("FMP error:", data)
-            return None
-
-        df = pd.DataFrame(data["historical"])
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date")
-
-        return df.set_index("date")["close"]
-
-    except Exception as e:
-        print("FMP fetch failed:", e)
-        return None
 
 
 
@@ -57,12 +24,32 @@ INDIAN_LIST = [
 def normalize_symbol(stock):
     """
     Add .NS ONLY for Indian stocks.
-    US tickers remain untouched.
     """
     s = stock.upper().strip()
     if s in INDIAN_LIST:
         return s + ".NS"
     return s
+
+
+
+# ---------- Yahoo Finance Fetcher ----------
+def fetch_yf_history(symbol):
+    """
+    Fetch 6 months of data from yfinance.
+    """
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="6mo")
+
+        if hist.empty:
+            print("yfinance returned empty data for:", symbol)
+            return None
+
+        return hist["Close"]
+
+    except Exception as e:
+        print("yfinance fetch failed:", e)
+        return None
 
 
 
@@ -96,11 +83,11 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
 
     symbol = normalize_symbol(stock_symbol)
 
-    # Fetch data using FMP
-    close_prices = fetch_fmp_history(symbol)
+    # Fetch data using yfinance only
+    close_prices = fetch_yf_history(symbol)
 
     if close_prices is None or len(close_prices) < 50:
-        raise ValueError(f"No reliable data found for {symbol}.")
+        raise ValueError(f"No reliable price data found for {symbol}.")
 
     spot_price = float(close_prices.iloc[-1])
 
@@ -108,9 +95,10 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     log_returns = np.log(close_prices / close_prices.shift(1)).dropna()
     vol_annual = float(log_returns.std() * np.sqrt(252))
 
-    # Expiry time
+    # Expiry
     expiry = datetime.strptime(expiry_date, "%Y-%m-%d")
     T = (expiry - datetime.today()).days / 365.0
+
     if T <= 0:
         raise ValueError("Expiry must be in the future.")
 
@@ -125,6 +113,7 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
     recent = close_prices[-90:].values
     lr_pred, rf_pred = train_and_predict(recent, n_lags=5)
 
+    # Predicted option prices
     bs_lr, *_ = black_scholes_price(lr_pred, strike, T, r, vol_annual, option_type)
     bs_rf, *_ = black_scholes_price(rf_pred, strike, T, r, vol_annual, option_type)
 
@@ -134,7 +123,7 @@ def run_option_model(stock_symbol, strike, expiry_date, option_type):
         "Option Price": [price, bs_lr, bs_rf]
     })
 
-    # Disable backtest on Render
+    # Disable backtest to avoid slowdowns on deployment
     backtest_stats = None
 
     # Sentiment
