@@ -33,19 +33,19 @@
       <p class="text-center text-light mb-4">Enter stock details to calculate price, Greeks, ML predictions & sentiment.</p>
       <form action="/calculate" method="POST">
         <div class="mb-3">
-          <label class="form-label">Stock Symbol</label>
+          <label class="form-label" style="color: white;">Stock Symbol</label>
           <input type="text" class="form-control" name="stock" required placeholder="e.g. RELIANCE">
         </div>
         <div class="mb-3">
-          <label class="form-label">Strike Price</label>
+          <label class="form-label" style="color: white;">Strike Price</label>
           <input type="number" class="form-control" name="strike" required placeholder="Strike Price">
         </div>
         <div class="mb-3">
-          <label class="form-label">Expiry Date</label>
+          <label class="form-label" style="color: white;">Expiry Date</label>
           <input type="date" class="form-control" name="expiry" required>
         </div>
         <div class="mb-3">
-          <label class="form-label">Option Type</label>
+          <label class="form-label" style="color: white;">Option Type</label>
           <select class="form-select" name="option_type">
             <option value="call">Call</option>
             <option value="put">Put</option>
